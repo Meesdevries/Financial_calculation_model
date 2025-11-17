@@ -1,4 +1,4 @@
-# financial_model_app.py
+# libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -96,16 +96,15 @@ DEFAULT_PARAMS = {
     "working_hours_per_year": 8765,
     "output_kg_per_m3_per_year": 36.5,
     "capex_table": {40: 1_000_000, 45: 1_200_000, 60: 1_500_000, 80: 1_750_000, 90: 2_000_000, 120: 2_750_000},
-    "selling_prices": {"Spirulina": 125.00, "Haematococcus": 233.75, "Klamath": 233.75, "Dunaliella Salina": 233.75},
-    "production_kg_per_year": 2190.0,
-    "tax_threshold": 200_000.0,
+    "selling_prices": {"Haematococcus": 233.75, "Klamath": 233.75, "Dunaliella Salina": 233.75, "Spirulina": 125.00},
+    "tax_threshold": 200_000.0, 
     "tax_rate_below": 0.19,
     "tax_rate_above": 0.258,
+    "revenue_growth": 0.0,
+    "opex_growth": 0.0,
     # energy defaults
-    "annual_self_generation_kwh": 175200,
-    "pct_self_consumed": 0.0,
     "network_taxes": 0.03,
-    "electricity_consumption_kwh": 569725,
+    "kwh_M3_Hour": 1.0833
 }
 
 # -------------------------
@@ -136,12 +135,38 @@ if "scenarios" not in st.session_state:
                 pass
 
 # -------------------------
+# Session state defaults (Modelberekening)
+# -------------------------
+MODEL_DEFAULTS = {
+    "equity_pct": 20.0,
+    "loan_interest": 6.0,
+    "loan_term": 5,
+    "grace_period": 0,
+    "contract_type": "Fixed",
+    "fixed_price": 0.12,
+    "flex_day_price": 0.15,
+    "flex_night_price": 0.07,
+    "pct_day": 0.66,
+    "proj_years": 15,
+    "annual_self_generation_kwh": 0,
+    "start_year": datetime.now().year,
+    # UI selections:
+    "algae_type": list(params.get("selling_prices", {}).keys())[0] if params.get("selling_prices") else "Klamath",
+    "scale": sorted([int(k) for k in params.get("capex_table", {}).keys()])[0] if params.get("capex_table") else 60,
+    "selected_year_for_pl": None,
+}
+
+for k, v in MODEL_DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# -------------------------
 # UI Layout and pages
 # -------------------------
 st.set_page_config(page_title="Algae Financial Model", layout="wide")
 st.title("Algae Financial Model")
 
-page = st.sidebar.radio("Pagina", ["Parameters & Assumpties", "Modelberekening", "Scenario's"])
+page = st.sidebar.radio("Pagina", ["Modelberekening", "Parameters & Assumpties",  "Scenario's"])
 
 # -------------------------
 # PARAMETERS PAGE
@@ -158,17 +183,28 @@ if page == "Parameters & Assumpties":
             discount_rate = st.number_input("Discount rate (NPV, %)", value=float(params.get("discount_rate",0.03)*100))/100
             working_hours = st.number_input("Working hours per year", value=float(params.get("working_hours_per_year",8765)))
             output_kg_m3 = st.number_input("Output (kg/m³/yr)", value=float(params.get("output_kg_per_m3_per_year",36.5)))
-            production_fixed = st.number_input("Production (kg/yr) - fixed", value=float(params.get("production_kg_per_year",2190.0)))
         with col2:
             st.subheader("Belastingen")
             tax_threshold = st.number_input("Tax threshold (EUR)", value=float(params.get("tax_threshold",200000.0)))
             tax_rate_below = st.number_input("Tax rate if profit ≤ threshold (%)", value=float(params.get("tax_rate_below",0.19)*100))/100
             tax_rate_above = st.number_input("Tax rate if profit > threshold (%)", value=float(params.get("tax_rate_above",0.258)*100))/100
-
+            
         st.subheader("CAPEX per scale (wijzig rijen hieronder)")
-        # simple editable capex table via manual inputs (no experimental editor)
+        # ensure capex keys are numeric-friendly for display
         capex_items = params.get("capex_table", DEFAULT_PARAMS["capex_table"])
-        capex_df = pd.DataFrame([{"Scale (m3)": k, "CAPEX (€)": v} for k,v in sorted(capex_items.items())])
+        # If JSON stored keys are strings, convert to ints where possible
+        capex_items_norm = {}
+        for k,v in capex_items.items():
+            try:
+                capex_items_norm[int(k)] = float(v)
+            except Exception:
+                try:
+                    capex_items_norm[int(str(k))] = float(v)
+                except Exception:
+                    pass
+        if not capex_items_norm:
+            capex_items_norm = DEFAULT_PARAMS["capex_table"]
+        capex_df = pd.DataFrame([{"Scale (m3)": k, "CAPEX (€)": v} for k,v in sorted(capex_items_norm.items())])
         st.table(capex_df.reset_index(drop=True))
 
         # allow adding or editing via inputs below
@@ -177,19 +213,19 @@ if page == "Parameters & Assumpties":
             new_scale = st.number_input("Nieuw: Scale (m³)", value=60, step=5)
         with capex_edit_col2:
             new_capex = st.number_input(
-    "Nieuw: CAPEX (€)",
-    value=float(capex_items.get(new_scale, 1500000.0)),
-    step=1000.0,
-    format="%.2f"
-)
+                "Nieuw: CAPEX (€)",
+                value=float(capex_items_norm.get(new_scale, 1500000.0)),
+                step=1000.0,
+                format="%.2f"
+            )
 
         with capex_edit_col3:
             if st.form_submit_button("Voeg / update CAPEX rij"):
-                capex_items[int(new_scale)] = float(new_capex)
-                params["capex_table"] = capex_items
+                capex_items_norm[int(new_scale)] = float(new_capex)
+                params["capex_table"] = capex_items_norm
                 save_json(PARAM_FILE, params)
                 st.success(f"CAPEX voor schaal {new_scale} bijgewerkt.")
-                st.experimental_rerun()
+                st.rerun()
 
         st.subheader("Selling prices per algae type")
         selling_prices = params.get("selling_prices", DEFAULT_PARAMS["selling_prices"])
@@ -203,10 +239,10 @@ if page == "Parameters & Assumpties":
         st.subheader("Energie instellingen")
         col_e1, col_e2 = st.columns(2)
         with col_e1:
-            annual_self_generation_kwh = st.number_input("Annual self-generation (kWh)", value=float(params.get("annual_self_generation_kwh",175200)))
-            pct_self_consumed = st.number_input("% self-consumed of generation", value=float(params.get("pct_self_consumed",0.0)*100))/100
+            opex_growth = st.number_input("OPEX growth p.a. (%)", value=params.get("opex_growth",0.0)*100.0, step=0.1)/100.0
+            revenue_growth = st.number_input("Revenue growth p.a. (%)", value=params.get("revenue_growth",0.0)*100.0, step=0.1)/100.0
         with col_e2:
-            electricity_consumption_kwh = st.number_input("Electricity consumption (kWh/yr)", value=float(params.get("electricity_consumption_kwh",569725)))
+            kwh_M3_Hour = st.number_input("Electricity consumption (kWh/m³/hr)", value=float(params.get("kwh_M3_Hour",1.0833)))
             network_taxes = st.number_input("Network & taxes (EUR/kWh)", value=float(params.get("network_taxes",0.03)))
 
         submitted = st.form_submit_button("Opslaan alle parameters")
@@ -215,18 +251,18 @@ if page == "Parameters & Assumpties":
             params["discount_rate"] = discount_rate
             params["working_hours_per_year"] = working_hours
             params["output_kg_per_m3_per_year"] = output_kg_m3
-            params["production_kg_per_year"] = production_fixed
             params["tax_threshold"] = tax_threshold
             params["tax_rate_below"] = tax_rate_below
             params["tax_rate_above"] = tax_rate_above
             params["selling_prices"] = edited_selling
-            params["annual_self_generation_kwh"] = annual_self_generation_kwh
-            params["pct_self_consumed"] = pct_self_consumed
-            params["electricity_consumption_kwh"] = electricity_consumption_kwh
+            params["opex_growth"] = opex_growth
+            params["revenue_growth"] = revenue_growth
+            params["kwh_M3_Hour"] = kwh_M3_Hour
             params["network_taxes"] = network_taxes
+            params["capex_table"] = capex_items_norm
             save_json(PARAM_FILE, params)
             st.success("Parameters persistent opgeslagen.")
-            st.experimental_rerun()
+            st.rerun()
 
 # -------------------------
 # MODEL PAGE
@@ -237,76 +273,135 @@ elif page == "Modelberekening":
 
     # load fixed parameters from params
     selling_prices = params["selling_prices"]
-    production_fixed = params["production_kg_per_year"]
     capex_table = params["capex_table"]
     discount_rate = params["discount_rate"]
     tax_threshold = params["tax_threshold"]
     tax_rate_below = params["tax_rate_below"]
     tax_rate_above = params["tax_rate_above"]
     output_per_m3 = params["output_kg_per_m3_per_year"]
+    revenue_growth = params.get("revenue_growth", 0.0)
+    opex_growth = params.get("opex_growth", 0.0)
 
-    # energy params
-    annual_self_generation_kwh = params.get("annual_self_generation_kwh", 0.0)
-    pct_self_consumed = params.get("pct_self_consumed", 0.0)
-    network_taxes = params.get("network_taxes", 0.0)
-    baseline_electricity_consumption = params.get("electricity_consumption_kwh", 0.0)
+    # ensure capex_table keys are ints for selection
+    capex_table_norm = {}
+    for k,v in capex_table.items():
+        try:
+            capex_table_norm[int(k)] = float(v)
+        except Exception:
+            pass
+    if not capex_table_norm:
+        capex_table_norm = {60: 1500000.0}
+    scales_sorted = sorted(capex_table_norm.keys())
 
-    # fixed info display (non-editable here)
+    # -------------------------
+    # FIXED INFO DISPLAY
+    # -------------------------
     c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        algae_type = st.selectbox("Algae type", list(selling_prices.keys()))
-        st.caption("Selling price (EUR/kg) — niet bewerkbaar hier")
-        st.markdown(f"**{eur_format(selling_prices[algae_type])}**")
-        st.caption("Production (kg/yr) — niet bewerkbaar")
-        st.markdown(f"**{production_fixed:,.0f} kg/yr**")
     with c2:
         st.caption("Select scale (M³)")
-        scales_sorted = sorted([int(k) for k in capex_table.keys()])
-        scale = st.selectbox("Scale (M³)", scales_sorted, index=scales_sorted.index(60) if 60 in scales_sorted else 0)
+        # use session_state.scale as default index if present in list
+        default_scale = st.session_state.get("scale", scales_sorted[0] if scales_sorted else 60)
+        if default_scale not in scales_sorted:
+            default_scale = scales_sorted[0]
+            st.session_state["scale"] = default_scale
+        scale = st.selectbox("Scale (M³)", scales_sorted, index=scales_sorted.index(default_scale), key="scale")
         # Fix voor string keys in capex_table (JSON)
-        capex_selected = float(capex_table.get(str(scale), capex_table.get(scale)))
+        capex_selected = float(capex_table_norm.get(int(scale), capex_table_norm.get(scale, 0.0)))
         st.caption("CAPEX selected — niet bewerkbaar")
         st.markdown(f"**{eur_format(capex_selected)}**")
         st.caption("Output (kg/m³/yr)")
         st.markdown(f"**{output_per_m3}**")
+
+        # fixed production calculation
+        production_fixed = output_per_m3 * scale if 'scale' in locals() else 0.0     
+
+    with c1:
+        default_algae = st.session_state.get("algae_type", list(selling_prices.keys())[0] if selling_prices else "Spirulina")
+        algae_type = st.selectbox("Algae type", list(selling_prices.keys()), index=list(selling_prices.keys()).index(default_algae) if default_algae in selling_prices else 0, key="algae_type")
+        st.caption("Selling price (EUR/kg) — niet bewerkbaar hier")
+        st.markdown(f"**{eur_format(selling_prices[algae_type])}**")
+        st.caption("Production (kg/yr) — niet bewerkbaar")
+        st.markdown(f"**{production_fixed:,.0f} kg/yr**") 
+
     with c3:
         st.caption("Discount rate (NPV) — niet bewerkbaar")
         st.markdown(f"**{discount_rate*100:.2f}%**")
         st.caption("Tax rule (automatic)")
         st.markdown(f"**{tax_rate_below*100:.2f}% if profit ≤ {eur_format(tax_threshold)}, else {tax_rate_above*100:.2f}%**")
+        st.caption("total electricity consumption (kwh/yr) — niet bewerkbaar")
+        st.markdown(f"**{(params.get('kwh_M3_Hour',1.0833) * params.get('working_hours_per_year',8765) * scale):.0f} kWh/yr**"
+        )                 
 
     st.markdown("---")
-    # compact editable inputs
+    # --------------------------------
+    # 🔧 PERSISTENT INPUTS (session_state-backed)
+    # --------------------------------
     left, mid, right = st.columns([1,1,1])
-    with left:
-        equity_pct = st.number_input("Equity %", value=20.0, step=1.0)
-        loan_interest = st.number_input("Loan interest (annual %)", value=6.0, step=0.1)
-    with mid:
-        loan_term = st.number_input("Loan term (years)", value=5, step=1)
-        grace_period = st.number_input("Grace period (years, interest-only)", value=0, step=1)
-    with right:
-        contract_type = st.selectbox("Contract type", ["Fixed", "Flexible"])
-        if contract_type == "Fixed":
-            fixed_price = st.number_input("Fixed electricity price (EUR/kWh)", value=0.12, step=0.001)
-            flex_day_price = None
-            flex_night_price = None
-            pct_day = None
-        else:
-            flex_day_price = st.number_input("Flex day price (EUR/kWh)", value=0.15, step=0.001)
-            flex_night_price = st.number_input("Flex night price (EUR/kWh)", value=0.07, step=0.001)
-            pct_day = st.slider("% consumption in day time", 0, 100, 66) / 100.0
-            fixed_price = None
 
-    # projection settings
+    with left:
+        st.number_input("Equity %", key="equity_pct", step=1.0)
+        st.number_input("Loan interest (annual %)", key="loan_interest", step=0.1)
+
+    with mid:
+        st.number_input("Loan term (years)", key="loan_term")
+        st.number_input("Grace period (years)", key="grace_period")
+
+    with right:
+        st.selectbox(
+            "Contract type",
+            ["Fixed", "Flexible"],
+            key="contract_type",
+        )
+
+        if st.session_state.contract_type == "Fixed":
+            st.number_input("Fixed electricity price", key="fixed_price")
+            # ensure flex fields exist but not shown
+            if "flex_day_price" not in st.session_state:
+                st.session_state["flex_day_price"] = MODEL_DEFAULTS["flex_day_price"]
+            if "flex_night_price" not in st.session_state:
+                st.session_state["flex_night_price"] = MODEL_DEFAULTS["flex_night_price"]
+            if "pct_day" not in st.session_state:
+                st.session_state["pct_day"] = MODEL_DEFAULTS["pct_day"]
+        else:
+            st.number_input("Flex day price", key="flex_day_price")
+            st.number_input("Flex night price", key="flex_night_price")
+            # slider stores integer percent then convert
+            pct_int = st.slider("% consumption in day time", 0, 100, int(st.session_state.pct_day * 100), key="pct_day_slider")
+            st.session_state.pct_day = pct_int / 100.0
+            # ensure fixed_price exists
+            if "fixed_price" not in st.session_state:
+                st.session_state["fixed_price"] = MODEL_DEFAULTS["fixed_price"]
+
+    # --------------------------------
+    # Projection settings (persistent)
+    # --------------------------------
     p1, p2 = st.columns([1,1])
     with p1:
-        proj_years = st.number_input("Projection years", min_value=5, max_value=30, value=15, step=1)
-        revenue_growth = st.number_input("Revenue growth p.a. (%)", value=0.0, step=0.1)/100.0
-    with p2:
-        opex_growth = st.number_input("OPEX growth p.a. (%)", value=0.0, step=0.1)/100.0
-        start_year = st.number_input("Start year", value=datetime.now().year, step=1)
+        st.number_input("Projection years", key="proj_years")
 
-    # core calcs
+    with p2:
+        st.number_input("Annual self-generation (kWh)", key="annual_self_generation_kwh")
+        st.number_input("Start year", key="start_year")
+
+    # --------------------------------
+    # CORE MODEL CALCULATIONS
+    # --------------------------------
+    equity_pct = st.session_state.equity_pct
+    loan_interest = st.session_state.loan_interest
+    loan_term = st.session_state.loan_term
+    grace_period = st.session_state.grace_period
+    contract_type = st.session_state.contract_type
+    fixed_price = st.session_state.fixed_price
+    flex_day_price = st.session_state.flex_day_price
+    flex_night_price = st.session_state.flex_night_price
+    pct_day = st.session_state.pct_day
+    proj_years = st.session_state.proj_years
+    annual_self_generation_kwh = st.session_state.annual_self_generation_kwh
+    start_year = st.session_state.start_year
+    algae_type = st.session_state.algae_type
+    scale = st.session_state.scale
+
+    # (vanaf hier is jouw originele berekeningen/code)
     selling_price = float(selling_prices[algae_type])
     effective_sales = production_fixed
     revenue_year1 = effective_sales * selling_price
@@ -315,10 +410,9 @@ elif page == "Modelberekening":
     staff_cost = 0.3 * 55000  # example
     sla_cost = 1_500_000 * 0.08  # placeholder
     # energy calculations (self generation reduces purchased kWh)
-    annual_self = float(annual_self_generation_kwh)
-    self_consumed_kwh = annual_self * float(pct_self_consumed)
-    exported_kwh = max(annual_self - self_consumed_kwh, 0.0)
-    purchased_kwh = max(baseline_electricity_consumption - self_consumed_kwh, 0.0)
+    self_generated_energy = int(annual_self_generation_kwh)
+    baseline_electricity_consumption = params.get("kwh_M3_Hour", 1.0833) * params.get("working_hours_per_year", 8765) * scale if 'scale' in locals() else 0.0
+    purchased_kwh = max(baseline_electricity_consumption - self_generated_energy, 0.0)
 
     if contract_type == "Flexible":
         day_frac = pct_day if pct_day is not None else 0.66
@@ -326,9 +420,8 @@ elif page == "Modelberekening":
     else:
         purchase_price = fixed_price
 
-    cost_purchased = purchased_kwh * (purchase_price + network_taxes)
-    feed_in_value = exported_kwh 
-    electricity_cost_total = cost_purchased - feed_in_value  # net electricity cost
+    network_taxes = params.get("network_taxes", 0.0)
+    electricity_cost_total = purchased_kwh * (purchase_price + network_taxes)   # net electricity cost
     total_opex_year1 = staff_cost + sla_cost + electricity_cost_total
 
     # CAPEX and financing
@@ -418,7 +511,13 @@ elif page == "Modelberekening":
 
     # Year selection for P&L view (dropdown)
     available_years = list(cashflow_df["Year"].astype(int).tolist())
-    selected_year = st.selectbox("Selecteer jaar voor P&L weergave", available_years, index=0)
+    # default selected year is first year unless the user previously picked one
+    if st.session_state.get("selected_year_for_pl") in available_years:
+        idx_default = available_years.index(st.session_state.get("selected_year_for_pl"))
+    else:
+        idx_default = 0
+        st.session_state["selected_year_for_pl"] = available_years[0] if available_years else None
+    selected_year = st.selectbox("Selecteer jaar voor P&L weergave", available_years, index=idx_default, key="selected_year_for_pl")
     # extract row
     pl_row = cashflow_df[cashflow_df["Year"] == selected_year].iloc[0]
     pl_display = pd.DataFrame({
@@ -486,8 +585,7 @@ elif page == "Modelberekening":
     x_min = int(plot_df["Year"].min())
     x_max = int(plot_df["Year"].max())
     fig.update_xaxes(range=[x_min, x_max], autorange=False)
-    # Format y-axis tick labels using European format function via tickformat is complex,
-    # so show hovertemplate with formatted currency
+    # Format y-axis tick labels using European format function via hovertemplate
     fig.update_traces(hovertemplate="%{x}: %{y:.2f}")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -514,8 +612,7 @@ elif page == "Modelberekening":
                 "grace_period": grace_period,
                 "contract_type": contract_type,
                 "purchase_price": purchase_price if 'purchase_price' in locals() else None,
-                "annual_self_generation_kwh": annual_self,
-                "pct_self_consumed": pct_self_consumed
+                "annual_self_generation_kwh": annual_self_generation_kwh,   
             },
             "kpis": {
                 "revenue_y1": float(cashflow_df.loc[0,"Revenue"]),
@@ -581,11 +678,6 @@ elif page == "Scenario's":
     else:
         df = pd.DataFrame.from_dict(scenarios, orient="index")
         # show summary table (select key KPI columns)
-        def fmt_if_num(x):
-            try:
-                return f"{x:,.2f}"
-            except Exception:
-                return x
         summary_rows = []
         for name, sc in scenarios.items():
             k = sc.get("kpis", {})
@@ -624,4 +716,3 @@ elif page == "Scenario's":
             for f in files:
                 os.remove(os.path.join(SCENARIO_DIR, f))
             st.success("Alle persistente scenario bestanden verwijderd.")
-   
